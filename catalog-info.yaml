@@ -1,0 +1,14 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ka-os
+  description: A minimal educational operating system written in C for RISC-V 32-bit architecture. This OS demonstrates fundamental operating system concepts including process management, memory management, system calls, and file system operations.
+  annotations:
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - c
+    
+spec:
+  type: library
+  lifecycle: experimental
+  owner: user:kavyan256
