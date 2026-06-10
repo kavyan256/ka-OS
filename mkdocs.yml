@@ -1,0 +1,5 @@
+site_name: ka-os
+site_description: A minimal educational operating system written in C for RISC-V 32-bit architecture. This OS demonstrates fundamental operating system concepts including process management, memory management, system calls, and file system operations.
+docs_dir: docs
+plugins:
+  - techdocs-core
