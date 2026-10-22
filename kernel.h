@@ -1,6 +1,13 @@
 #pragma once
 #define SSTATUS_SPIE (1 << 5)
+#define SSTATUS_SPP  (1 << 8)   // previous privilege: 1 = trap came from S-mode
 #define SCAUSE_ECALL 8
+#define SCAUSE_INTERRUPT (1u << 31)  // top bit of scause: interrupt, not exception
+#define SCAUSE_S_TIMER   5
+#define SIE_STIE     (1 << 5)   // enable supervisor timer interrupts
+
+#define SBI_EID_TIME 0x54494D45 // "TIME" extension (sbi_set_timer)
+#define TIME_SLICE_TICKS 500000 // 50 ms at QEMU virt's 10 MHz timebase
 #define PROC_EXITED   2
 
 #define PANIC(fmt, ...)                                                        \
@@ -166,8 +173,10 @@ struct virtio_blk_req {
 } __attribute__((packed));
 
 //tar file system
-#define FILES_MAX      2
-#define DISK_MAX_SIZE  align_up(sizeof(struct file) * FILES_MAX, SECTOR_SIZE)
+#define FILES_MAX      8
+#define FILE_DATA_MAX  1024
+// Worst case in the tar image: one header sector + file data, per file.
+#define DISK_MAX_SIZE  ((SECTOR_SIZE + FILE_DATA_MAX) * FILES_MAX)
 
 struct tar_header {
     char name[100];
@@ -194,7 +203,7 @@ struct tar_header {
 struct file {
     bool in_use;      // Indicates if this file entry is in use
     char name[100];   // File name
-    char data[1024];  // File content
+    char data[FILE_DATA_MAX];  // File content
     size_t size;      // File size
 };
 

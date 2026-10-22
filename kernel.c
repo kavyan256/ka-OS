@@ -2,6 +2,7 @@
 #include "common.h"
 
 extern char __bss[], __bss_end[], __stack_top[] ,__free_ram[], __free_ram_end[], __kernel_base[], _binary_shell_bin_start[], _binary_shell_bin_size[];
+extern char _binary_spin_bin_start[], _binary_spin_bin_size[];
 extern void main(void);
 
 // Function declarations
@@ -23,6 +24,8 @@ void virtio_blk_init(void);
 void fs_init(void);
 void fs_flush(void);
 struct file *fs_lookup(const char *filename);
+
+extern struct file files[FILES_MAX];
 
 //GLOBAL VARIABLES
 struct process procs[PROCS_MAX]; // All process control structures.
@@ -93,6 +96,26 @@ void putchar(char ch) {
 long getchar(void) {
     struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
     return ret.error;
+}
+
+// TIMER (drives preemption)
+static uint64_t read_time(void) {
+    // On RV32 the 64-bit `time` counter is split in two CSRs; re-read the high
+    // half to guard against a carry between the two reads.
+    uint32_t hi, lo, hi2;
+    do {
+        hi  = READ_CSR(timeh);
+        lo  = READ_CSR(time);
+        hi2 = READ_CSR(timeh);
+    } while (hi != hi2);
+    return ((uint64_t) hi << 32) | lo;
+}
+
+// Ask the SBI firmware for a timer interrupt TIME_SLICE_TICKS from now. This
+// also clears the pending supervisor timer interrupt (STIP).
+void timer_arm(void) {
+    uint64_t when = read_time() + TIME_SLICE_TICKS;
+    sbi_call((uint32_t) when, (uint32_t) (when >> 32), 0, 0, 0, 0, 0, SBI_EID_TIME);
 }
 
 __attribute__((naked))
@@ -373,6 +396,49 @@ void proc_b_entry(void) {
     }
 }
 
+// USER POINTER VALIDATION
+// Syscall arguments are untrusted addresses. SUM lets S-mode touch U pages, but
+// does not stop a user from passing a kernel address or an unmapped one, so
+// every pointer is checked against the caller's own page table first.
+static uint32_t *lookup_pte(uint32_t *table1, uint32_t vaddr) {
+    uint32_t pte1 = table1[(vaddr >> 22) & 0x3ff];
+    if ((pte1 & PAGE_V) == 0)
+        return NULL;
+    uint32_t *table0 = (uint32_t *) ((pte1 >> 10) * PAGE_SIZE);
+    return &table0[(vaddr >> 12) & 0x3ff];
+}
+
+// True if [addr, addr+len) lies in user space and every page is mapped with
+// PAGE_U and the `need` permission (PAGE_R or PAGE_W).
+static bool user_range_ok(uint32_t addr, uint32_t len, uint32_t need) {
+    uint32_t end = addr + len;
+    if (end < addr)                       // wrapped around 2^32
+        return false;
+    if (addr < USER_BASE || end > USER_STACK_TOP)
+        return false;
+
+    uint32_t want = PAGE_V | PAGE_U | need;
+    for (uint32_t page = addr & ~(PAGE_SIZE - 1); page < end; page += PAGE_SIZE) {
+        uint32_t *pte = lookup_pte(current_proc->page_table, page);
+        if (!pte || (*pte & want) != want)
+            return false;
+    }
+    return true;
+}
+
+// Copy a NUL-terminated string out of user space into `dst` (at most `cap`
+// bytes including the NUL). Fails if unterminated or any byte is not readable.
+static bool copy_user_string(char *dst, size_t cap, uint32_t uaddr) {
+    for (size_t i = 0; i < cap; i++) {
+        if (!user_range_ok(uaddr + i, 1, PAGE_R))
+            return false;
+        dst[i] = *(const char *) (uaddr + i);
+        if (dst[i] == '\0')
+            return true;
+    }
+    return false;
+}
+
 void handle_syscall(struct trap_frame *f) {
     switch (f->a3) {
         case SYS_PUTCHAR:
@@ -399,20 +465,54 @@ void handle_syscall(struct trap_frame *f) {
 
         case SYS_READFILE:
         case SYS_WRITEFILE: {
-            const char *filename = (const char *) f->a0;
-            char *buf = (char *) f->a1;
-            int len = f->a2;
+            bool is_write = f->a3 == SYS_WRITEFILE;
+            char filename[sizeof(files[0].name)];
+            if (!copy_user_string(filename, sizeof(filename), f->a0)) {
+                f->a0 = -1;
+                break;
+            }
+
             struct file *file = fs_lookup(filename);
+            if (!file && is_write) {
+                // Create the file on first write (works on an empty disk).
+                for (int i = 0; i < FILES_MAX; i++) {
+                    if (!files[i].in_use) {
+                        file = &files[i];
+                        memset(file, 0, sizeof(*file));
+                        file->in_use = true;
+                        strcpy(file->name, filename);
+                        break;
+                    }
+                }
+                if (!file) {
+                    printf("no free file slot for: %s\n", filename);
+                    f->a0 = -1;
+                    break;
+                }
+            }
             if (!file) {
                 printf("file not found: %s\n", filename);
                 f->a0 = -1;
                 break;
             }
 
-            if (len > (int) sizeof(file->data))
+            int len = (int) f->a2;
+            if (len < 0 || (is_write && len > (int) sizeof(file->data))) {
+                f->a0 = -1;
+                break;
+            }
+            // A read returns at most what the file holds, never the whole buffer.
+            if (!is_write && len > (int) file->size)
                 len = file->size;
 
-            if (f->a3 == SYS_WRITEFILE) {
+            // The user buffer is the destination of a read, the source of a write.
+            if (!user_range_ok(f->a1, len, is_write ? PAGE_R : PAGE_W)) {
+                f->a0 = -1;
+                break;
+            }
+            char *buf = (char *) f->a1;
+
+            if (is_write) {
                 memcpy(file->data, buf, len);
                 file->size = len;
                 fs_flush();
@@ -424,6 +524,50 @@ void handle_syscall(struct trap_frame *f) {
             break;
         }
 
+        case SYS_LISTFILES: {
+            // a0 = n: copy the name of the n-th existing file to a1 (cap a2),
+            // return its size, or -1 when there is no n-th file.
+            int n = (int) f->a0;
+            int cap = (int) f->a2;
+            f->a0 = -1;
+            if (n < 0 || cap <= 0)
+                break;
+            for (int i = 0; i < FILES_MAX; i++) {
+                if (!files[i].in_use || n--)
+                    continue;
+                int namelen = 0;
+                while (files[i].name[namelen])
+                    namelen++;
+                if (namelen + 1 > cap || !user_range_ok(f->a1, namelen + 1, PAGE_W))
+                    break;
+                memcpy((char *) f->a1, files[i].name, namelen + 1);
+                f->a0 = files[i].size;
+                break;
+            }
+            break;
+        }
+
+        case SYS_DELETEFILE: {
+            char filename[sizeof(files[0].name)];
+            if (!copy_user_string(filename, sizeof(filename), f->a0)) {
+                f->a0 = -1;
+                break;
+            }
+            struct file *file = fs_lookup(filename);
+            if (!file) {
+                f->a0 = -1;
+                break;
+            }
+            memset(file, 0, sizeof(*file));
+            fs_flush();
+            f->a0 = 0;
+            break;
+        }
+
+        case SYS_GETPID:
+            f->a0 = current_proc->pid;
+            break;
+
         default:
             PANIC("unexpected syscall a3=%x\n", f->a3);
     }
@@ -433,9 +577,26 @@ void handle_trap(struct trap_frame *f) {
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
     uint32_t user_pc = READ_CSR(sepc);
-    if (scause == SCAUSE_ECALL) {
+    uint32_t sstatus = READ_CSR(sstatus);
+
+    // sepc is kept in a local, not re-read: yield() may run other processes
+    // whose traps overwrite the sepc CSR before we get scheduled back.
+    if (scause == (SCAUSE_INTERRUPT | SCAUSE_S_TIMER)) {
+        // Preemption: time slice over. Re-arm (clears STIP) and give up the CPU.
+        // sepc is NOT advanced: the interrupted instruction never completed.
+        timer_arm();
+        yield();
+    } else if (scause == SCAUSE_ECALL) {
         handle_syscall(f);
-        user_pc += 4;
+        user_pc += 4;   // sepc points AT the ecall; step past it or it re-executes
+    } else if (!(scause & SCAUSE_INTERRUPT) && !(sstatus & SSTATUS_SPP)) {
+        // A user program faulted (bad pointer, illegal instruction, ...):
+        // kill that process, not the whole kernel.
+        printf("process %d killed: scause=%x, stval=%x, sepc=%x\n",
+               current_proc->pid, scause, stval, user_pc);
+        current_proc->state = PROC_EXITED;
+        yield();
+        PANIC("unreachable");
     } else {
         PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
     }
@@ -603,6 +764,8 @@ void fs_init(void) {
             PANIC("invalid tar header: magic=\"%s\"", header->magic);
 
         int filesz = oct2int(header->size, sizeof(header->size));
+        if (filesz > (int) sizeof(files[i].data))
+            PANIC("file %s too large: %d bytes", header->name, filesz);
         struct file *file = &files[i];
         file->in_use = true;
         strcpy(file->name, header->name);
@@ -663,7 +826,7 @@ void fs_flush(void) {
 struct file *fs_lookup(const char *filename) {
     for (int i = 0; i < FILES_MAX; i++) {
         struct file *file = &files[i];
-        if (!strcmp(file->name, filename))
+        if (file->in_use && !strcmp(file->name, filename))
             return file;
     }
 
@@ -684,7 +847,7 @@ struct file *fs_lookup(const char *filename) {
 
 void kernel_main(void) {
     memset(__bss, 0, (size_t) __bss_end - (size_t) __bss);
-    printf("Kernel started\n\n");
+    printf("Kernel started\nWelcome to my Ka-OS,\n\n");
     WRITE_CSR(stvec, (uint32_t) kernel_entry);
 
     virtio_blk_init();
@@ -694,7 +857,19 @@ void kernel_main(void) {
     idle_proc->pid = 0; // idle
     current_proc = idle_proc;
 
+#ifdef PREEMPT_DEMO
+    // Two CPU-bound programs that never call yield(): only the timer can
+    // make them take turns. Build with: DEMO=1 ./run.sh
+    create_process(_binary_spin_bin_start, (size_t) _binary_spin_bin_size);
+    create_process(_binary_spin_bin_start, (size_t) _binary_spin_bin_size);
+#else
     create_process(_binary_shell_bin_start, (size_t) _binary_shell_bin_size);
+#endif
+
+    // Enable supervisor timer interrupts. They can only fire while a process
+    // runs in U-mode: the kernel keeps sstatus.SIE = 0, so it is never preempted.
+    WRITE_CSR(sie, READ_CSR(sie) | SIE_STIE);
+    timer_arm();
 
     yield();
     

@@ -32,6 +32,18 @@ int writefile(const char *filename, const char *buf, int len) {
     return syscall(SYS_WRITEFILE, (int) filename, (int) buf, len);
 }
 
+int listfile(int n, char *namebuf, int cap) {
+    return syscall(SYS_LISTFILES, n, (int) namebuf, cap);
+}
+
+int deletefile(const char *filename) {
+    return syscall(SYS_DELETEFILE, (int) filename, 0, 0);
+}
+
+int getpid(void) {
+    return syscall(SYS_GETPID, 0, 0, 0);
+}
+
 __attribute__((noreturn)) void exit(void) {
     syscall(SYS_EXIT, 0, 0, 0);
     for (;;); // Just in case!
