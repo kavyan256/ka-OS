@@ -679,6 +679,7 @@ void handle_syscall(struct trap_frame *f) {
             }
             while (child->state != PROC_EXITED)
                 yield();                     // let the child run, then check again
+            child->state = PROC_UNUSED;      // reap it: the slot can be reused
             f->a0 = 0;
             break;
         }
