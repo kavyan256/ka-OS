@@ -53,8 +53,14 @@ cp disk/*.txt build/image/ 2>/dev/null || true
 (cd build/image && ls | tar cf ../../disk.tar --format=ustar -T /dev/stdin)
 truncate -s 72K disk.tar                                                      # must be >= DISK_MAX_SIZE in kernel.h
 
+# VIRTIO_MODERN=1 makes QEMU present a modern (version 2) disk instead of a legacy one.
+VIRTIO_ARGS=""
+if [ "${VIRTIO_MODERN:-0}" = "1" ]; then
+    VIRTIO_ARGS="-global virtio-mmio.force-legacy=false"
+fi
+
 # Start QEMU
-$QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot \
+$QEMU -machine virt $VIRTIO_ARGS -bios default -nographic -serial mon:stdio --no-reboot \
     -d unimp,guest_errors,int,cpu_reset -D qemu.log \
     -drive id=drive0,file=disk.tar,format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \

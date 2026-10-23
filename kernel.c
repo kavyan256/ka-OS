@@ -794,12 +794,14 @@ struct virtio_virtq *blk_request_vq;
 struct virtio_blk_req *blk_req;
 paddr_t blk_req_paddr;
 uint64_t blk_capacity;
+static uint32_t virtio_version;   // 1 = legacy device, 2 = modern device
 
 void virtio_blk_init(void) {
     if (virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976)
         PANIC("virtio: invalid magic value");
-    if (virtio_reg_read32(VIRTIO_REG_VERSION) != 1)
-        PANIC("virtio: invalid version");
+    virtio_version = virtio_reg_read32(VIRTIO_REG_VERSION);
+    if (virtio_version != 1 && virtio_version != 2)
+        PANIC("virtio: unsupported version %d", virtio_version);
     if (virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK)
         PANIC("virtio: invalid device id");
 
@@ -809,8 +811,21 @@ void virtio_blk_init(void) {
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
     // 3. Set the DRIVER status bit.
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
+    if (virtio_version == 2) {
+        // Modern devices must be told we speak VIRTIO_F_VERSION_1; we want nothing else.
+        virtio_reg_write32(VIRTIO_REG_DEVICE_FEATURES_SEL, 1);
+        if (!(virtio_reg_read32(VIRTIO_REG_DEVICE_FEATURES) & VIRTIO_F_VERSION_1_HI))
+            PANIC("virtio: device does not offer VIRTIO_F_VERSION_1");
+        virtio_reg_write32(VIRTIO_REG_DRIVER_FEATURES_SEL, 0);
+        virtio_reg_write32(VIRTIO_REG_DRIVER_FEATURES, 0);
+        virtio_reg_write32(VIRTIO_REG_DRIVER_FEATURES_SEL, 1);
+        virtio_reg_write32(VIRTIO_REG_DRIVER_FEATURES, VIRTIO_F_VERSION_1_HI);
+    }
     // 5. Set the FEATURES_OK status bit.
     virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FEAT_OK);
+    if (virtio_version == 2 &&
+        !(virtio_reg_read32(VIRTIO_REG_DEVICE_STATUS) & VIRTIO_STATUS_FEAT_OK))
+        PANIC("virtio: device rejected our features");
     // 7. Perform device-specific setup, including discovery of virtqueues for the device
     blk_request_vq = virtq_init(0);
     // 8. Set the DRIVER_OK status bit.
@@ -835,10 +850,23 @@ struct virtio_virtq *virtq_init(unsigned index) {
     virtio_reg_write32(VIRTIO_REG_QUEUE_SEL, index);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM);
-    // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 0);
-    // 7. Write the physical number of the first page of the queue to the QueuePFN register.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, virtq_paddr);
+    if (virtio_version == 1) {
+        // Legacy: one write says where the whole queue is.
+        // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign.
+        virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 0);
+        // 7. Write the physical number of the first page of the queue to the QueuePFN register.
+        virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, virtq_paddr);
+    } else {
+        // Modern: say where each of the three parts is (high halves are 0:
+        // our memory is below 4 GB), then switch the queue on.
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DESC_LOW,    (uint32_t) &vq->descs);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DESC_HIGH,   0);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DRIVER_LOW,  (uint32_t) &vq->avail);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DRIVER_HIGH, 0);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DEVICE_LOW,  (uint32_t) &vq->used);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_DEVICE_HIGH, 0);
+        virtio_reg_write32(VIRTIO_REG_QUEUE_READY, 1);
+    }
     return vq;
 }
 

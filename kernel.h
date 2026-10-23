@@ -140,6 +140,17 @@ struct elf32_phdr {       // one row of the "instruction sheet"
 #define VIRTIO_REG_MAGIC         0x00
 #define VIRTIO_REG_VERSION       0x04
 #define VIRTIO_REG_DEVICE_ID     0x08
+#define VIRTIO_REG_DEVICE_FEATURES     0x10
+#define VIRTIO_REG_DEVICE_FEATURES_SEL 0x14
+#define VIRTIO_REG_DRIVER_FEATURES     0x20
+#define VIRTIO_REG_DRIVER_FEATURES_SEL 0x24
+#define VIRTIO_REG_QUEUE_DESC_LOW      0x80
+#define VIRTIO_REG_QUEUE_DESC_HIGH     0x84
+#define VIRTIO_REG_QUEUE_DRIVER_LOW    0x90
+#define VIRTIO_REG_QUEUE_DRIVER_HIGH   0x94
+#define VIRTIO_REG_QUEUE_DEVICE_LOW    0xa0
+#define VIRTIO_REG_QUEUE_DEVICE_HIGH   0xa4
+#define VIRTIO_F_VERSION_1_HI          1     // feature bit 32 = bit 0 of the high word
 #define VIRTIO_REG_QUEUE_SEL     0x30
 #define VIRTIO_REG_QUEUE_NUM_MAX 0x34
 #define VIRTIO_REG_QUEUE_NUM     0x38
