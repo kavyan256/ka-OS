@@ -44,6 +44,10 @@ int exec(const char *name, const char *args) {
     return syscall(SYS_EXEC, (int) name, (int) args, 0);
 }
 
+int wait(int pid) {
+    return syscall(SYS_WAIT, pid, 0, 0);
+}
+
 int getargs(char *buf, int cap) {
     return syscall(SYS_GETARGS, (int) buf, cap, 0);
 }

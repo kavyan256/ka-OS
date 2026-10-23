@@ -12,3 +12,4 @@ int listfile(int n, char *namebuf, int cap);
 int deletefile(const char *filename);
 int getargs(char *buf, int cap);
 int exec(const char *name, const char *args);
+int wait(int pid);

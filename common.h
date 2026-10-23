@@ -35,4 +35,5 @@ void printf(const char *fmt, ...);
 #define SYS_DELETEFILE 8
 #define SYS_GETARGS    9
 #define SYS_EXEC       10
+#define SYS_WAIT       11
 #define ARGS_MAX       128

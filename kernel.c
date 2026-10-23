@@ -659,7 +659,27 @@ void handle_syscall(struct trap_frame *f) {
                 break;
             }
             strcpy(child->args, args);
+            child->ppid = current_proc->pid;
             f->a0 = child->pid;               // success: the new process's id
+            break;
+        }
+
+        case SYS_WAIT: {
+            // Polling: if the child is still running, step aside and check
+            // again later. (A blocking version is on the README roadmap.)
+            int pid = (int) f->a0;
+            if (pid <= 0 || pid > PROCS_MAX) {
+                f->a0 = -1;
+                break;
+            }
+            struct process *child = &procs[pid - 1];   // pid = slot + 1
+            if (child->state == PROC_UNUSED || child->ppid != current_proc->pid) {
+                f->a0 = -1;                  // no such process, or not our child
+                break;
+            }
+            while (child->state != PROC_EXITED)
+                yield();                     // let the child run, then check again
+            f->a0 = 0;
             break;
         }
 

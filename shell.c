@@ -16,30 +16,23 @@ static void help(void) {
            "  hello                 say hello\n"
            "  echo <text>           print text\n"
            "  echo <text> > <file>  write text to a file\n"
-           "  ls                    list files\n"
-           "  cat <file>            print a file\n"
            "  write <file> <text>   write text to a file\n"
            "  rm <file>             delete a file\n"
            "  run <prog> [args]     run a program from disk\n"
-           "  exit                  exit the shell\n");
+           "  exit                  exit the shell\n"
+           "programs on disk (or any program name):\n"
+           "  ls                    list files\n"
+           "  cat <file>            print a file\n");
 }
 
-static void cmd_ls(void) {
-    char name[100];
-    int size;
-    for (int i = 0; (size = listfile(i, name, sizeof(name))) >= 0; i++)
-        printf("%s  %d bytes\n", name, size);
-}
-
-static void cmd_cat(const char *name) {
-    char buf[FILE_BUF + 1];
-    int len = readfile(name, buf, FILE_BUF);
-    if (len < 0)
-        return; // the kernel already printed "file not found"
-    buf[len] = '\0';
-    printf("%s", buf);
-    if (len == 0 || buf[len - 1] != '\n')
-        printf("\n");
+// Run a program from disk and wait for it. Returns false if it could not
+// be started (no such file, not a program, or no free process slot).
+static bool run_program(const char *name, const char *args) {
+    int pid = exec(name, args);
+    if (pid < 0)
+        return false;
+    wait(pid);
+    return true;
 }
 
 // Write `text` plus a newline to `name`.
@@ -108,14 +101,7 @@ prompt:
             printf("Hello world from shell!\n");
         else if (strcmp(cmd, "exit") == 0)
             exit();
-        else if (strcmp(cmd, "ls") == 0)
-            cmd_ls();
-        else if (strcmp(cmd, "cat") == 0) {
-            if (argc < 2)
-                printf("usage: cat <file>\n");
-            else
-                cmd_cat(argv[1]);
-        } else if (strcmp(cmd, "rm") == 0) {
+        else if (strcmp(cmd, "rm") == 0) {
             if (argc < 2)
                 printf("usage: rm <file>\n");
             else if (deletefile(argv[1]) < 0)
@@ -123,7 +109,7 @@ prompt:
         } else if (strcmp(cmd, "run") == 0) {
             if (argc < 2)
                 printf("usage: run <program> [args]\n");
-            else if (exec(argv[1], argc > 2 ? rest[1] : "") < 0)
+            else if (!run_program(argv[1], argc > 2 ? rest[1] : ""))
                 printf("run: cannot execute: %s\n", argv[1]);
         } else if (strcmp(cmd, "write") == 0) {
             if (argc < 2)
@@ -148,7 +134,7 @@ prompt:
                 *end = '\0';
                 cmd_write(argv[redir + 1], rest[0]);
             }
-        } else
+        } else if (!run_program(cmd, rest[0]))
             printf("unknown command: %s (try help)\n", cmd);
     }
 }

@@ -84,6 +84,7 @@ struct process {
     vaddr_t sp;
     uint32_t *page_table;
     char args[ARGS_MAX];     // argument string handed over by exec
+    int ppid;                // pid of the process that exec'd this one
     uint8_t stack[8192];
 };
 
