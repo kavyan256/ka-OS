@@ -37,7 +37,25 @@ struct process *proc_a;
 struct process *proc_b;
 
 //MEMORY MANAGEMENT
+// Pages given back by finished processes. Each free page stores the address
+// of the next free page in its first 4 bytes, so the list needs no memory.
+static paddr_t free_list = 0;
+
+void free_page(paddr_t paddr) {
+    *(paddr_t *) paddr = free_list;
+    free_list = paddr;
+}
+
 paddr_t alloc_pages(uint32_t n) {
+    // Reuse a returned page first. Only single pages: the list cannot
+    // promise pages that sit next to each other.
+    if (n == 1 && free_list) {
+        paddr_t paddr = free_list;
+        free_list = *(paddr_t *) paddr;
+        memset((void *) paddr, 0, PAGE_SIZE);
+        return paddr;
+    }
+
     static paddr_t next_paddr = (paddr_t) __free_ram;
     paddr_t paddr = next_paddr;
     next_paddr += n * PAGE_SIZE;
@@ -68,6 +86,24 @@ void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
     uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
     table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
+
+// Give back every page a finished process owned: its user pages, its
+// 2nd-level tables and its root table. Pages without PAGE_U (the kernel and
+// the disk device) are shared with every process and must NOT be freed.
+static void free_process_memory(uint32_t *table1) {
+    for (int vpn1 = 0; vpn1 < 1024; vpn1++) {
+        if (!(table1[vpn1] & PAGE_V))
+            continue;
+        uint32_t *table0 = (uint32_t *) ((table1[vpn1] >> 10) * PAGE_SIZE);
+        for (int vpn0 = 0; vpn0 < 1024; vpn0++) {
+            uint32_t pte = table0[vpn0];
+            if ((pte & PAGE_V) && (pte & PAGE_U))
+                free_page((pte >> 10) * PAGE_SIZE);
+        }
+        free_page((paddr_t) table0);
+    }
+    free_page((paddr_t) table1);
 }
 
 //SBI INTERFACE
@@ -679,6 +715,7 @@ void handle_syscall(struct trap_frame *f) {
             }
             while (child->state != PROC_EXITED)
                 yield();                     // let the child run, then check again
+            free_process_memory(child->page_table);
             child->state = PROC_UNUSED;      // reap it: the slot can be reused
             f->a0 = 0;
             break;
