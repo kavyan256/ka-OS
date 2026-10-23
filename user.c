@@ -40,6 +40,14 @@ int deletefile(const char *filename) {
     return syscall(SYS_DELETEFILE, (int) filename, 0, 0);
 }
 
+int exec(const char *name, const char *args) {
+    return syscall(SYS_EXEC, (int) name, (int) args, 0);
+}
+
+int getargs(char *buf, int cap) {
+    return syscall(SYS_GETARGS, (int) buf, cap, 0);
+}
+
 int getpid(void) {
     return syscall(SYS_GETPID, 0, 0, 0);
 }

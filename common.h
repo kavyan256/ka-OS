@@ -33,3 +33,6 @@ void printf(const char *fmt, ...);
 #define SYS_GETPID    6
 #define SYS_LISTFILES 7
 #define SYS_DELETEFILE 8
+#define SYS_GETARGS    9
+#define SYS_EXEC       10
+#define ARGS_MAX       128

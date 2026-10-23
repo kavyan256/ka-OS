@@ -37,10 +37,21 @@ fi
 $CC $CFLAGS $KERNEL_DEFS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf \
     kernel.c common.c shell.bin.o spin.bin.o
 
-# Build the disk image; an empty (or missing) disk/ directory gives an empty tar.
+# Build the programs that live on the disk (stripped ELF, small).
+mkdir -p build/image
+rm -f build/image/*
+for prog in ls cat; do
+    $CC $CFLAGS -I. -Wl,-Tuser.ld -Wl,-z,max-page-size=4 -Wl,-Map=build/$prog.map \
+        -o build/$prog.elf progs/$prog.c user.c common.c
+    $OBJCOPY --strip-all build/$prog.elf build/image/$prog
+done
+
+# Build the disk image: text files from disk/ plus the programs.
+# An empty (or missing) disk/ directory is fine.
 mkdir -p disk
-(cd disk && find . -maxdepth 1 -name '*.txt' -printf '%f\n' | tar cf ../disk.tar --format=ustar -T /dev/stdin)
-truncate -s 16K disk.tar                                                      # room for the kernel's whole disk buffer
+cp disk/*.txt build/image/ 2>/dev/null || true
+(cd build/image && ls | tar cf ../../disk.tar --format=ustar -T /dev/stdin)
+truncate -s 72K disk.tar                                                      # must be >= DISK_MAX_SIZE in kernel.h
 
 # Start QEMU
 $QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot \

@@ -83,6 +83,7 @@ struct process {
     int state;
     vaddr_t sp;
     uint32_t *page_table;
+    char args[ARGS_MAX];     // argument string handed over by exec
     uint8_t stack[8192];
 };
 
@@ -97,6 +98,38 @@ struct process {
 #define USER_BASE 0x1000000
 #define USER_STACK_PAGES 1
 #define USER_STACK_TOP (USER_BASE + 0x100000) 
+// Programs may be loaded in [USER_BASE, USER_LIMIT); the stack page lies above.
+#define USER_LIMIT     (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
+
+// ELF32 (see the "elf" man page). Only what the loader needs.
+#define ELF_MACHINE_RISCV 243
+#define PT_LOAD           1
+
+struct elf32_header {
+    uint8_t  ident[16];   // 0x7f 'E' 'L' 'F', class (1 = 32-bit), endianness (1 = little)
+    uint16_t type;
+    uint16_t machine;     // 243 = RISC-V
+    uint32_t version;
+    uint32_t entry;       // address of the first instruction
+    uint32_t phoff;       // where the program-header table starts in the file
+    uint32_t shoff;
+    uint32_t flags;
+    uint16_t ehsize;
+    uint16_t phentsize;   // size of one program header
+    uint16_t phnum;       // how many program headers
+    uint16_t shentsize, shnum, shstrndx;
+} __attribute__((packed));
+
+struct elf32_phdr {       // one row of the "instruction sheet"
+    uint32_t type;        // PT_LOAD = "put this in memory"
+    uint32_t offset;      // where its bytes start in the file
+    uint32_t vaddr;       // where it goes in memory
+    uint32_t paddr;
+    uint32_t filesz;      // bytes to copy from the file
+    uint32_t memsz;       // bytes it occupies in memory (>= filesz; the rest is zeros)
+    uint32_t flags;
+    uint32_t align;
+} __attribute__((packed));
 
 //virtio macros
 #define SECTOR_SIZE       512
@@ -174,7 +207,7 @@ struct virtio_blk_req {
 
 //tar file system
 #define FILES_MAX      8
-#define FILE_DATA_MAX  1024
+#define FILE_DATA_MAX  8192   // room for a small program (ELF ~3 KB)
 // Worst case in the tar image: one header sector + file data, per file.
 #define DISK_MAX_SIZE  ((SECTOR_SIZE + FILE_DATA_MAX) * FILES_MAX)
 

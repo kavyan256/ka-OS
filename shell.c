@@ -20,6 +20,7 @@ static void help(void) {
            "  cat <file>            print a file\n"
            "  write <file> <text>   write text to a file\n"
            "  rm <file>             delete a file\n"
+           "  run <prog> [args]     run a program from disk\n"
            "  exit                  exit the shell\n");
 }
 
@@ -119,6 +120,11 @@ prompt:
                 printf("usage: rm <file>\n");
             else if (deletefile(argv[1]) < 0)
                 printf("rm: no such file: %s\n", argv[1]);
+        } else if (strcmp(cmd, "run") == 0) {
+            if (argc < 2)
+                printf("usage: run <program> [args]\n");
+            else if (exec(argv[1], argc > 2 ? rest[1] : "") < 0)
+                printf("run: cannot execute: %s\n", argv[1]);
         } else if (strcmp(cmd, "write") == 0) {
             if (argc < 2)
                 printf("usage: write <file> <text>\n");

@@ -24,6 +24,7 @@ void virtio_blk_init(void);
 void fs_init(void);
 void fs_flush(void);
 struct file *fs_lookup(const char *filename);
+static uint32_t *lookup_pte(uint32_t *table1, uint32_t vaddr);
 
 extern struct file files[FILES_MAX];
 
@@ -261,6 +262,75 @@ __attribute__((naked)) void user_entry(void) {
 }
 
 //PROCESS MANAGEMENT
+static bool is_elf(const uint8_t *b, size_t size) {
+    return size >= 4 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F';
+}
+
+// Copy the PT_LOAD segments of an ELF file into the process's address space.
+// Returns false (loading nothing more) if the file is malformed.
+static bool load_elf(uint32_t *page_table, const uint8_t *elf, size_t size) {
+    const struct elf32_header *eh = (const struct elf32_header *) elf;
+
+    // 1. Is this really a 32-bit little-endian RISC-V ELF?
+    if (size < sizeof(*eh) ||
+        eh->ident[0] != 0x7f || eh->ident[1] != 'E' ||
+        eh->ident[2] != 'L'  || eh->ident[3] != 'F' ||
+        eh->ident[4] != 1 || eh->ident[5] != 1 ||
+        eh->machine != ELF_MACHINE_RISCV)
+        return false;
+
+    // 2. user_entry always starts at USER_BASE, so refuse anything else.
+    if (eh->entry != USER_BASE)
+        return false;
+
+    // 3. Is the program-header table inside the file?
+    if (eh->phentsize != sizeof(struct elf32_phdr) ||
+        eh->phoff > size ||
+        (size - eh->phoff) / sizeof(struct elf32_phdr) < eh->phnum)
+        return false;
+
+    for (int i = 0; i < eh->phnum; i++) {
+        const struct elf32_phdr *ph =
+            (const struct elf32_phdr *) (elf + eh->phoff) + i;
+        if (ph->type != PT_LOAD)
+            continue;
+
+        // 4. Sanity checks, so a bad file can't make us read or map outside bounds.
+        if (ph->filesz > ph->memsz ||
+            ph->offset > size || ph->filesz > size - ph->offset ||
+            ph->vaddr < USER_BASE || ph->vaddr >= USER_LIMIT ||
+            ph->memsz > USER_LIMIT - ph->vaddr)
+            return false;
+
+        // 5. Walk every 4 KB page the segment touches.
+        for (uint32_t page_va = ph->vaddr & ~(PAGE_SIZE - 1);
+             page_va < ph->vaddr + ph->memsz; page_va += PAGE_SIZE) {
+
+            // Another segment may already own this page. Reuse it.
+            paddr_t page;
+            uint32_t *pte = lookup_pte(page_table, page_va);
+            if (pte && (*pte & PAGE_V)) {
+                page = (*pte >> 10) * PAGE_SIZE;
+            } else {
+                page = alloc_pages(1);                  // comes back zeroed
+                map_page(page_table, page_va, page,
+                         PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+            }
+
+            // Copy only the part of this page that comes from the file.
+            // Anything past filesz stays zero (that's the .bss).
+            uint32_t file_start = ph->vaddr;
+            uint32_t file_end   = ph->vaddr + ph->filesz;
+            uint32_t from = page_va > file_start ? page_va : file_start;
+            uint32_t to   = page_va + PAGE_SIZE < file_end ? page_va + PAGE_SIZE : file_end;
+            if (from < to)
+                memcpy((void *) (page + (from - page_va)),
+                       elf + ph->offset + (from - ph->vaddr), to - from);
+        }
+    }
+    return true;
+}
+
 struct process *create_process(const void *image, size_t image_size) {
     // 1️⃣ Find an unused process slot
     struct process *proc = NULL;
@@ -273,7 +343,7 @@ struct process *create_process(const void *image, size_t image_size) {
     }
 
     if (!proc)
-        PANIC("no free process slots");
+        return NULL;     // table full (a syscall must not take the kernel down)
 
     // 2️⃣ Allocate a page table for this process
     uint32_t *page_table = (uint32_t *) alloc_pages(1);
@@ -287,7 +357,11 @@ struct process *create_process(const void *image, size_t image_size) {
     map_page(page_table, VIRTIO_BLK_PADDR, VIRTIO_BLK_PADDR, PAGE_R | PAGE_W);
 
     // 4️⃣ Map user pages (if image provided)
-    if (image && image_size > 0) {
+    const uint8_t *bytes = image;
+    if (is_elf(bytes, image_size)) {
+        if (!load_elf(page_table, bytes, image_size))
+            return NULL;    // bad ELF; the process slot is not claimed
+    } else if (image && image_size > 0) {
         for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
             paddr_t page = alloc_pages(1);
 
@@ -564,6 +638,44 @@ void handle_syscall(struct trap_frame *f) {
             break;
         }
 
+        case SYS_EXEC: {
+            char name[sizeof(files[0].name)];
+            char args[ARGS_MAX];
+            if (!copy_user_string(name, sizeof(name), f->a0) ||
+                !copy_user_string(args, sizeof(args), f->a1)) {
+                f->a0 = -1;
+                break;
+            }
+
+            struct file *file = fs_lookup(name);
+            if (!file || !is_elf((uint8_t *) file->data, file->size)) {
+                f->a0 = -1;                   // no such file, or not a program
+                break;
+            }
+
+            struct process *child = create_process(file->data, file->size);
+            if (!child) {                     // bad ELF or no free slot
+                f->a0 = -1;
+                break;
+            }
+            strcpy(child->args, args);
+            f->a0 = child->pid;               // success: the new process's id
+            break;
+        }
+
+        case SYS_GETARGS: {
+            int len = 0;
+            while (current_proc->args[len])
+                len++;
+            if (f->a1 < (uint32_t) len + 1 || !user_range_ok(f->a0, len + 1, PAGE_W)) {
+                f->a0 = -1;
+                break;
+            }
+            memcpy((void *) f->a0, current_proc->args, len + 1);
+            f->a0 = len;
+            break;
+        }
+
         case SYS_GETPID:
             f->a0 = current_proc->pid;
             break;
@@ -751,6 +863,10 @@ int oct2int(char *oct, int len) {
 }
 
 void fs_init(void) {
+    if (blk_capacity < sizeof(disk))
+        PANIC("disk image is %d bytes but the kernel needs %d (see run.sh)",
+              (uint32_t) blk_capacity, (uint32_t) sizeof(disk));
+
     for (unsigned sector = 0; sector < sizeof(disk) / SECTOR_SIZE; sector++)
         read_write_disk(&disk[sector * SECTOR_SIZE], sector, false);
 
